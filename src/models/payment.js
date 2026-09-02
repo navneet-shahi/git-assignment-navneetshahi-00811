@@ -45,7 +45,7 @@ const paymentSchema = new mongoose.Schema({
     type: String,
     enum: ['visa', 'mastercard', 'amex', 'discover'],
   },
-  transactionId: {  // External gateway transaction reference
+  paymentId: {  // External gateway transaction reference
     type: String,
     unique: true,
     sparse: true,
@@ -56,7 +56,8 @@ const paymentSchema = new mongoose.Schema({
 
 paymentSchema.index({ order: 1 });
 paymentSchema.index({ user: 1, status: 1 });
-paymentSchema.index({ transactionId: 1 });
+paymentSchema.index({ paymentId: 1 });
 
 module.exports = mongoose.model('Payment', paymentSchema);
 module.exports.PAYMENT_STATUS = PAYMENT_STATUS;
+
