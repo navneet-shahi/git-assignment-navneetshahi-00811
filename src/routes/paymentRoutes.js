@@ -1,12 +1,14 @@
 const express = require('express');
 const router = express.Router();
-// TODO: wire up controller once it exists
-// const paymentController = require('../controllers/paymentController');
+const { initiatePayment, getPaymentStatus, refundPayment } = require('../controllers/paymentController');
 
-// POST /api/payments - initiate payment
-router.put('/', (req, res) => res.status(501).json({ message: 'Not implemented' }));
+// POST /api/payments - initiate a payment
+router.post('/', initiatePayment);
 
 // GET /api/payments/:id - get payment status
-router.get('/:id', (req, res) => res.status(501).json({ message: 'Not implemented' }));
+router.get('/:id', getPaymentStatus);
+
+// POST /api/payments/:id/refund - refund a payment
+router.post('/:id/refund', refundPayment);
 
 module.exports = router;
