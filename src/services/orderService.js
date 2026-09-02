@@ -1,12 +1,10 @@
 const Order = require('../models/order');
 const Product = require('../models/product');
 const User = require('../models/user');
-const { ORDER_STATUS, ORDER_LIMITS } = require('../config/constants');
+const { ORDER_STATUS, ORDER_LIMITS, DISCOUNT_CONFIG } = require('../config/constants');
 
 /**
  * Calculate the subtotal for a list of order items.
- * @param {Array} items - Array of { unitPrice, quantity }
- * @returns {number} subtotal
  */
 const calculateSubtotal = (items) => {
   return items.reduce((total, item) => {
@@ -15,12 +13,49 @@ const calculateSubtotal = (items) => {
 };
 
 /**
- * Calculate the grand total for an order.
+ * Calculate the grand total, applying a discount to the subtotal.
  * @param {number} subtotal
- * @returns {number} total amount due
+ * @param {number} discountAmount - flat amount to subtract (default: 0)
+ * @returns {number} total amount due (never goes below 0)
  */
-const calculateTotal = (subtotal) => {
-  return parseFloat(subtotal.toFixed(2));
+const calculateTotal = (subtotal, discountAmount = 0) => {
+  const discounted = subtotal - discountAmount;
+  return parseFloat(Math.max(0, discounted).toFixed(2));
+};
+
+/**
+ * Look up and apply a discount code to a subtotal.
+ * Returns the discount amount and a description.
+ * @param {number} subtotal
+ * @param {string} discountCode
+ * @returns {{ discountAmount: number, discountDescription: string, valid: boolean }}
+ */
+const applyDiscount = (subtotal, discountCode) => {
+  if (!discountCode) {
+    return { discountAmount: 0, discountDescription: null, valid: false };
+  }
+
+  const code = DISCOUNT_CONFIG.CODES[discountCode.toUpperCase()];
+  if (!code) {
+    return { discountAmount: 0, discountDescription: null, valid: false };
+  }
+
+  if (subtotal < DISCOUNT_CONFIG.MIN_ORDER_FOR_DISCOUNT) {
+    const err = new Error(`Discount codes require a minimum order of $${DISCOUNT_CONFIG.MIN_ORDER_FOR_DISCOUNT}.`);
+    err.statusCode = 400;
+    throw err;
+  }
+
+  let discountAmount = 0;
+  if (code.type === 'percentage') {
+    discountAmount = parseFloat((subtotal * (code.value / 100)).toFixed(2));
+    const maxDiscount = subtotal * (DISCOUNT_CONFIG.MAX_DISCOUNT_PERCENTAGE / 100);
+    discountAmount = Math.min(discountAmount, maxDiscount);
+  } else if (code.type === 'fixed') {
+    discountAmount = Math.min(code.value, subtotal);
+  }
+
+  return { discountAmount, discountDescription: code.description, valid: true };
 };
 
 /**
@@ -41,21 +76,9 @@ const validateAndEnrichItems = async (items) => {
   const enrichedItems = [];
   for (const item of items) {
     const product = await Product.findById(item.productId);
-    if (!product) {
-      const err = new Error(`Product with ID '${item.productId}' was not found.`);
-      err.statusCode = 404;
-      throw err;
-    }
-    if (!product.isAvailable) {
-      const err = new Error(`'${product.name}' is currently unavailable.`);
-      err.statusCode = 422;
-      throw err;
-    }
-    if (product.stock < item.quantity) {
-      const err = new Error(`Insufficient stock for '${product.name}'. Available: ${product.stock}, Requested: ${item.quantity}.`);
-      err.statusCode = 422;
-      throw err;
-    }
+    if (!product) { const err = new Error(`Product '${item.productId}' not found.`); err.statusCode = 404; throw err; }
+    if (!product.isAvailable) { const err = new Error(`'${product.name}' is unavailable.`); err.statusCode = 422; throw err; }
+    if (product.stock < item.quantity) { const err = new Error(`Insufficient stock for '${product.name}'.`); err.statusCode = 422; throw err; }
 
     enrichedItems.push({
       product: product._id,
@@ -65,37 +88,33 @@ const validateAndEnrichItems = async (items) => {
       productSku: product.sku,
     });
   }
-
   return enrichedItems;
 };
 
 /**
- * Create a new order for a user.
+ * Create a new order, applying an optional discount code.
  */
 const createOrder = async (userId, orderData) => {
-  const { items, shippingAddress, notes } = orderData;
+  const { items, shippingAddress, notes, discountCode } = orderData;
 
   const enrichedItems = await validateAndEnrichItems(items);
   const subtotal = calculateSubtotal(enrichedItems);
 
-  if (subtotal < ORDER_LIMITS.MIN_ORDER_AMOUNT) {
-    const err = new Error(`Order minimum is $${ORDER_LIMITS.MIN_ORDER_AMOUNT.toFixed(2)}.`);
-    err.statusCode = 400;
-    throw err;
-  }
-  if (subtotal > ORDER_LIMITS.MAX_ORDER_AMOUNT) {
-    const err = new Error(`Order maximum is $${ORDER_LIMITS.MAX_ORDER_AMOUNT.toFixed(2)}.`);
-    err.statusCode = 400;
-    throw err;
-  }
+  if (subtotal < ORDER_LIMITS.MIN_ORDER_AMOUNT) { const err = new Error(`Minimum order is $${ORDER_LIMITS.MIN_ORDER_AMOUNT}.`); err.statusCode = 400; throw err; }
+  if (subtotal > ORDER_LIMITS.MAX_ORDER_AMOUNT) { const err = new Error(`Maximum order is $${ORDER_LIMITS.MAX_ORDER_AMOUNT}.`); err.statusCode = 400; throw err; }
 
-  const totalAmount = calculateTotal(subtotal);
+  // Apply discount code if provided
+  const { discountAmount, discountDescription, valid } = applyDiscount(subtotal, discountCode);
+  const totalAmount = calculateTotal(subtotal, discountAmount);
 
   const order = new Order({
     user: userId,
     items: enrichedItems,
     shippingAddress,
     subtotal,
+    discountCode: valid ? discountCode.toUpperCase() : undefined,
+    discountAmount,
+    discountDescription,
     totalAmount,
     notes,
     statusHistory: [{ status: ORDER_STATUS.PENDING }],
@@ -103,127 +122,56 @@ const createOrder = async (userId, orderData) => {
 
   await order.save();
 
-  // Decrement stock for each purchased product
-  const stockUpdates = enrichedItems.map((item) =>
+  await Promise.all(enrichedItems.map((item) =>
     Product.findByIdAndUpdate(item.product, { $inc: { stock: -item.quantity } })
-  );
-  await Promise.all(stockUpdates);
+  ));
 
-  // Update user's order stats
-  await User.findByIdAndUpdate(userId, {
-    $inc: { totalOrders: 1, totalSpend: totalAmount },
-  });
+  await User.findByIdAndUpdate(userId, { $inc: { totalOrders: 1, totalSpend: totalAmount } });
 
   return order.populate('items.product');
 };
 
-/**
- * Get all orders for a specific user.
- */
 const getOrdersByUser = async (userId) => {
-  return Order.find({ user: userId })
-    .populate('items.product', 'name sku images')
-    .sort({ createdAt: -1 });
+  return Order.find({ user: userId }).populate('items.product', 'name sku images').sort({ createdAt: -1 });
 };
 
-/**
- * Get a single order by ID (with ownership check).
- */
 const getOrderById = async (orderId, userId, userRole) => {
   const order = await Order.findById(orderId).populate('items.product');
-  if (!order) {
-    const err = new Error('Order not found.');
-    err.statusCode = 404;
-    throw err;
-  }
-  if (userRole !== 'admin' && order.user.toString() !== userId.toString()) {
-    const err = new Error('You are not authorized to view this order.');
-    err.statusCode = 403;
-    throw err;
-  }
+  if (!order) { const err = new Error('Order not found.'); err.statusCode = 404; throw err; }
+  if (userRole !== 'admin' && order.user.toString() !== userId.toString()) { const err = new Error('Not authorized.'); err.statusCode = 403; throw err; }
   return order;
 };
 
-/**
- * Update the status of an order (admin only).
- */
 const updateOrderStatus = async (orderId, newStatus, adminId, reason) => {
   const validTransitions = {
-    pending: ['confirmed', 'cancelled'],
-    confirmed: ['processing', 'cancelled'],
-    processing: ['shipped', 'cancelled'],
-    shipped: ['delivered'],
-    delivered: ['refunded'],
-    cancelled: [],
-    refunded: [],
+    pending: ['confirmed', 'cancelled'], confirmed: ['processing', 'cancelled'],
+    processing: ['shipped', 'cancelled'], shipped: ['delivered'],
+    delivered: ['refunded'], cancelled: [], refunded: [],
   };
-
   const order = await Order.findById(orderId);
-  if (!order) {
-    const err = new Error('Order not found.');
-    err.statusCode = 404;
-    throw err;
-  }
-
-  if (!validTransitions[order.status].includes(newStatus)) {
-    const err = new Error(`Cannot transition order from '${order.status}' to '${newStatus}'.`);
-    err.statusCode = 422;
-    throw err;
-  }
-
+  if (!order) { const err = new Error('Order not found.'); err.statusCode = 404; throw err; }
+  if (!validTransitions[order.status].includes(newStatus)) { const err = new Error(`Cannot transition from '${order.status}' to '${newStatus}'.`); err.statusCode = 422; throw err; }
   order.status = newStatus;
   order.statusHistory.push({ status: newStatus, changedBy: adminId, reason });
   await order.save();
-
   return order;
 };
 
-/**
- * Cancel a pending order (user-initiated).
- */
 const cancelOrder = async (orderId, userId) => {
   const order = await Order.findById(orderId);
-  if (!order) {
-    const err = new Error('Order not found.');
-    err.statusCode = 404;
-    throw err;
-  }
-  if (order.user.toString() !== userId.toString()) {
-    const err = new Error('You are not authorized to cancel this order.');
-    err.statusCode = 403;
-    throw err;
-  }
-  if (order.status !== ORDER_STATUS.PENDING) {
-    const err = new Error(`Only pending orders can be cancelled. Current status: '${order.status}'.`);
-    err.statusCode = 422;
-    throw err;
-  }
-
+  if (!order) { const err = new Error('Order not found.'); err.statusCode = 404; throw err; }
+  if (order.user.toString() !== userId.toString()) { const err = new Error('Not authorized.'); err.statusCode = 403; throw err; }
+  if (order.status !== ORDER_STATUS.PENDING) { const err = new Error('Only pending orders can be cancelled.'); err.statusCode = 422; throw err; }
   order.status = ORDER_STATUS.CANCELLED;
   order.statusHistory.push({ status: ORDER_STATUS.CANCELLED, changedBy: userId, reason: 'Cancelled by customer' });
   await order.save();
-
-  // Restore inventory stock
-  const stockRestores = order.items.map((item) =>
-    Product.findByIdAndUpdate(item.product, { $inc: { stock: item.quantity } })
-  );
-  await Promise.all(stockRestores);
-
-  // Adjust user stats
-  await User.findByIdAndUpdate(userId, {
-    $inc: { totalOrders: -1, totalSpend: -order.totalAmount },
-  });
-
+  await Promise.all(order.items.map((item) => Product.findByIdAndUpdate(item.product, { $inc: { stock: item.quantity } })));
+  await User.findByIdAndUpdate(userId, { $inc: { totalOrders: -1, totalSpend: -order.totalAmount } });
   return order;
 };
 
 module.exports = {
-  calculateSubtotal,
-  calculateTotal,
-  validateAndEnrichItems,
-  createOrder,
-  getOrdersByUser,
-  getOrderById,
-  updateOrderStatus,
-  cancelOrder,
+  calculateSubtotal, calculateTotal, applyDiscount,
+  validateAndEnrichItems, createOrder, getOrdersByUser,
+  getOrderById, updateOrderStatus, cancelOrder,
 };
