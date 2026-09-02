@@ -23,23 +23,50 @@ const validateAmount = (amount) => {
 };
 
 /**
+ * Validate basic card number format (16 digits for Visa/MC, 15 for Amex).
+ * NOTE: This is basic format validation only — real validation happens at the gateway.
+ */
+const validateCardNumber = (cardNumber) => {
+  const cleaned = String(cardNumber).replace(/\s|-/g, '');
+  if (!/^\d{15,16}$/.test(cleaned)) {
+    const err = new Error('Card number must be 15 or 16 digits.');
+    err.statusCode = 400;
+    throw err;
+  }
+  return cleaned;
+};
+
+/**
+ * Detect card brand from card number prefix.
+ */
+const detectCardBrand = (cardNumber) => {
+  if (/^4/.test(cardNumber)) return 'visa';
+  if (/^5[1-5]/.test(cardNumber)) return 'mastercard';
+  if (/^3[47]/.test(cardNumber)) return 'amex';
+  if (/^6(?:011|5)/.test(cardNumber)) return 'discover';
+  return null;
+};
+
+/**
  * Process a payment for an order.
  */
 const processPayment = async (paymentData) => {
   const { orderId, userId, amount, cardNumber, expiryMonth, expiryYear, cvv } = paymentData;
 
   validateAmount(amount);
+  const cleanedCard = validateCardNumber(cardNumber);
+  const cardLastFour = cleanedCard.slice(-4);
+  const cardBrand = detectCardBrand(cleanedCard);
 
-  // TODO: validate card number format
-  // TODO: call payment gateway
-
-  const cardLastFour = String(cardNumber).slice(-4);
+  // TODO: call actual payment gateway (Stripe/Braintree)
+  // const gatewayResponse = await stripeClient.charges.create({...});
 
   const payment = new Payment({
     order: orderId,
     user: userId,
     amount,
     cardLastFour,
+    cardBrand,
     status: 'pending',
   });
 
@@ -47,4 +74,4 @@ const processPayment = async (paymentData) => {
   return payment;
 };
 
-module.exports = { processPayment, validateAmount };
+module.exports = { processPayment, validateAmount, validateCardNumber, detectCardBrand };
