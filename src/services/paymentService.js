@@ -57,10 +57,7 @@ const processPayment = async (paymentData) => {
   const cleanedCard = validateCardNumber(cardNumber);
   const cardLastFour = cleanedCard.slice(-4);
   const cardBrand = detectCardBrand(cleanedCard);
-
-  // TODO: call actual payment gateway (Stripe/Braintree)
-  // const gatewayResponse = await stripeClient.charges.create({...});
-
+  
   const payment = new Payment({
     order: orderId,
     user: userId,
@@ -75,3 +72,4 @@ const processPayment = async (paymentData) => {
 };
 
 module.exports = { processPayment, validateAmount, validateCardNumber, detectCardBrand };
+

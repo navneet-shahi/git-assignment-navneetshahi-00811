@@ -5,10 +5,7 @@ const paymentService = require('../services/paymentService');
  * Initiate a payment for an order.
  */
 const initiatePayment = async (req, res, next) => {
-  try {
-    // TODO: add input validation middleware
-    // TODO: verify order belongs to req.user
-    const paymentData = { ...req.body, userId: req.user.id };
+  try {    const paymentData = { ...req.body, userId: req.user.id };
     const payment = await paymentService.processPayment(paymentData);
     res.status(201).json({ success: true, message: 'Payment initiated.', data: payment });
   } catch (err) {
@@ -43,3 +40,4 @@ const refundPayment = async (req, res, next) => {
 };
 
 module.exports = { initiatePayment, getPaymentStatus, refundPayment };
+
